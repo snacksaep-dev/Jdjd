@@ -1,0 +1,415 @@
+local shared = odh_shared_plugins
+local my_own_section = shared.AddSection("Firefly Timer")
+
+my_own_section:AddLabel("Made by: SANGUINE 🤤🤤")
+
+my_own_section:AddParagraph("Firefly Timer", "Shows a countdown from 2.5s when you activate the Fireflies tool.")
+
+-- Configuration
+local countdownDuration = 2.5
+local frameSize = UDim2.new(0, 100, 0, 50)
+local framePosition = UDim2.new(0.5, -50, 0.5, -100)
+local cdFontSize = 22
+local autoJumpEnabled = false
+local jumpTriggerPoint = 0.23
+local jumpBurstDuration = 0.5
+
+-- State
+local enabled = false
+local isCountingDown = false
+local countdownConnection = nil
+local toolConnection = nil
+local screenGui, frame, label, stroke, corner
+
+-- Cooldown state
+local cdScreenGui, cdFrame, cdLabel
+local cooldownConnection = nil
+local blockConnection = nil
+local isOnCooldown = false
+
+-- Jump state
+local jumpTriggered = false
+local jumpBurstConnection = nil
+local jumpActionBound = false
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ContextActionService = game:GetService("ContextActionService")
+local LocalPlayer = Players.LocalPlayer
+
+-- Build the GUI (created once, reused)
+local function buildGui()
+	if screenGui then return end
+
+	screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "FireflyTimerGui"
+	screenGui.ResetOnSpawn = false
+	screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+	frame = Instance.new("Frame")
+	frame.Name = "TimerFrame"
+	frame.Size = frameSize
+	frame.Position = framePosition
+	frame.BackgroundTransparency = 0.7
+	frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	frame.BorderSizePixel = 0
+	frame.Visible = false
+	frame.Parent = screenGui
+
+	stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(255, 0, 0)
+	stroke.Thickness = 1
+	stroke.Parent = frame
+
+	label = Instance.new("TextLabel")
+	label.Name = "CountdownLabel"
+	label.Size = UDim2.new(1, 0, 1, 0)
+	label.BackgroundTransparency = 1
+	label.TextColor3 = Color3.fromRGB(0, 0, 0)
+	label.TextScaled = true
+	label.Font = Enum.Font.GothamBold
+	label.Text = tostring(countdownDuration)
+	label.Parent = frame
+
+	corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = frame
+end
+
+-- Build the cooldown GUI
+local function buildCooldownGui()
+	if cdScreenGui then return end
+
+	cdScreenGui = Instance.new("ScreenGui")
+	cdScreenGui.Name = "FireflyCooldownGui"
+	cdScreenGui.ResetOnSpawn = false
+	cdScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+	cdFrame = Instance.new("Frame")
+	cdFrame.Name = "CooldownFrame"
+	cdFrame.Size = UDim2.new(0, 110, 0, 28)
+	cdFrame.Position = UDim2.new(0, 20, 0.5, 0)
+	cdFrame.BackgroundTransparency = 1
+	cdFrame.BorderSizePixel = 0
+	cdFrame.Active = true
+	cdFrame.Visible = false
+	cdFrame.Parent = cdScreenGui
+
+	cdLabel = Instance.new("TextLabel")
+	cdLabel.Name = "CooldownLabel"
+	cdLabel.Size = UDim2.new(1, 0, 1, 0)
+	cdLabel.BackgroundTransparency = 1
+	cdLabel.TextColor3 = Color3.fromRGB(0, 0, 0)
+	cdLabel.TextSize = cdFontSize
+	cdLabel.Font = Enum.Font.GothamBold
+	cdLabel.TextXAlignment = Enum.TextXAlignment.Left
+	cdLabel.Text = "0.0"
+	cdLabel.Parent = cdFrame
+
+	local dragging, dragStart, startPos
+
+	cdFrame.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = cdFrame.Position
+
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+
+	cdFrame.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch then
+			if dragging then
+				local delta = input.Position - dragStart
+				cdFrame.Position = UDim2.new(
+					startPos.X.Scale,
+					startPos.X.Offset + delta.X,
+					startPos.Y.Scale,
+					startPos.Y.Offset + delta.Y
+				)
+			end
+		end
+	end)
+end
+
+-- Bind the jump action once at toggle time
+local function bindJumpAction()
+	if jumpActionBound then return end
+
+	ContextActionService:BindAction(
+		"FireflyAutoJump",
+		function(actionName, inputState, inputObject)
+			if inputState == Enum.UserInputState.Begin then
+				local char = LocalPlayer.Character
+				if char then
+					local humanoid = char:FindFirstChildOfClass("Humanoid")
+					if humanoid then
+						humanoid.Jump = true
+						if humanoid.FloorMaterial ~= Enum.Material.Air then
+							humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+						end
+					end
+				end
+			end
+			return Enum.ContextActionResult.Pass
+		end,
+		false,
+		Enum.KeyCode.Space
+	)
+
+	jumpActionBound = true
+end
+
+local function unbindJumpAction()
+	if not jumpActionBound then return end
+	ContextActionService:UnbindAction("FireflyAutoJump")
+	jumpActionBound = false
+end
+
+-- Fire a jump input right now
+local function fireJump()
+	local char = LocalPlayer.Character
+	if not char then return end
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return end
+
+	humanoid.Jump = true
+	if humanoid.FloorMaterial ~= Enum.Material.Air then
+		humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+	end
+	ContextActionService:CallAction("FireflyAutoJump", Enum.UserInputState.Begin)
+end
+
+-- Jump burst
+local function startJumpBurst()
+	if jumpBurstConnection then
+		jumpBurstConnection:Disconnect()
+		jumpBurstConnection = nil
+	end
+
+	local elapsed = 0
+
+	jumpBurstConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		elapsed += deltaTime
+
+		if elapsed >= jumpBurstDuration then
+			if jumpBurstConnection then
+				jumpBurstConnection:Disconnect()
+				jumpBurstConnection = nil
+			end
+			return
+		end
+
+		fireJump()
+	end)
+end
+
+-- Countdown handler
+local function startCountdown()
+	if not enabled then return end
+	buildGui()
+
+	if countdownConnection then
+		countdownConnection:Disconnect()
+		countdownConnection = nil
+	end
+
+	jumpTriggered = false
+	isCountingDown = true
+	frame.Visible = true
+	frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	frame.BackgroundTransparency = 0.7
+	stroke.Color = Color3.fromRGB(255, 0, 0)
+	label.TextColor3 = Color3.fromRGB(0, 0, 0)
+	label.Text = string.format("%.1f", countdownDuration)
+
+	local timeLeft = countdownDuration
+
+	countdownConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		timeLeft -= deltaTime
+
+		if timeLeft <= 0 then
+			timeLeft = 0
+			label.Text = "0.0"
+			frame.Visible = false
+			isCountingDown = false
+			if countdownConnection then
+				countdownConnection:Disconnect()
+				countdownConnection = nil
+			end
+			return
+		end
+
+		if autoJumpEnabled and not jumpTriggered and timeLeft <= jumpTriggerPoint then
+			jumpTriggered = true
+			startJumpBurst()
+		end
+
+		label.Text = string.format("%.1f", timeLeft)
+	end)
+end
+
+-- Cooldown panel handler
+local function startCooldownPanel()
+	buildCooldownGui()
+
+	if cooldownConnection then
+		cooldownConnection:Disconnect()
+		cooldownConnection = nil
+	end
+
+	cdFrame.Visible = true
+	cdLabel.Text = "0.0"
+
+	local elapsed = 0
+
+	cooldownConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		elapsed += deltaTime
+
+		if elapsed >= 16 then
+			elapsed = 16
+			cdLabel.Text = "Active"
+			if cooldownConnection then
+				cooldownConnection:Disconnect()
+				cooldownConnection = nil
+			end
+			return
+		end
+
+		cdLabel.Text = string.format("%.1f", elapsed)
+	end)
+end
+
+-- 16 second block
+local function startBlockTimer()
+	isOnCooldown = true
+	if blockConnection then
+		blockConnection:Disconnect()
+		blockConnection = nil
+	end
+
+	local elapsed = 0
+
+	blockConnection = RunService.Heartbeat:Connect(function(deltaTime)
+		elapsed += deltaTime
+		if elapsed >= 16 then
+			isOnCooldown = false
+			if blockConnection then
+				blockConnection:Disconnect()
+				blockConnection = nil
+			end
+		end
+	end)
+end
+
+-- Connect to the Fireflies tool
+local function connectToTool(tool)
+	if toolConnection then
+		toolConnection:Disconnect()
+		toolConnection = nil
+	end
+
+	toolConnection = tool.Activated:Connect(function()
+		if not enabled then return end
+		if isOnCooldown then return end
+
+		startCountdown()
+		startCooldownPanel()
+		startBlockTimer()
+	end)
+end
+
+local function watchContainer(container)
+	if not container then return end
+
+	local tool = container:FindFirstChild("Fireflies")
+	if tool then
+		connectToTool(tool)
+	end
+
+	container.ChildAdded:Connect(function(child)
+		if child.Name == "Fireflies" then
+			connectToTool(child)
+		end
+	end)
+end
+
+local function hookTool()
+	watchContainer(LocalPlayer:FindFirstChildOfClass("Backpack"))
+	watchContainer(LocalPlayer.Character)
+
+	LocalPlayer.ChildAdded:Connect(function(child)
+		if child:IsA("Backpack") then
+			watchContainer(child)
+		end
+	end)
+
+	LocalPlayer.CharacterAdded:Connect(function(char)
+		watchContainer(char)
+	end)
+end
+
+local function unhookTool()
+	if toolConnection then
+		toolConnection:Disconnect()
+		toolConnection = nil
+	end
+	if countdownConnection then
+		countdownConnection:Disconnect()
+		countdownConnection = nil
+	end
+	if cooldownConnection then
+		cooldownConnection:Disconnect()
+		cooldownConnection = nil
+	end
+	if blockConnection then
+		blockConnection:Disconnect()
+		blockConnection = nil
+	end
+	if jumpBurstConnection then
+		jumpBurstConnection:Disconnect()
+		jumpBurstConnection = nil
+	end
+	unbindJumpAction()
+	if frame then frame.Visible = false end
+	if cdFrame then cdFrame.Visible = false end
+	isCountingDown = false
+	isOnCooldown = false
+end
+
+my_own_section:AddToggle("Enable Firefly Timer", function(bool)
+	enabled = bool
+	if bool then
+		buildGui()
+		buildCooldownGui()
+		bindJumpAction()
+		hookTool()
+		shared.Notify("Firefly Timer enabled", 2)
+	else
+		unhookTool()
+		shared.Notify("Firefly Timer disabled", 2)
+	end
+end)
+
+my_own_section:AddToggle("Auto Jump", function(bool)
+	autoJumpEnabled = bool
+	if bool then
+		shared.Notify("Auto Jump enabled", 2)
+	else
+		shared.Notify("Auto Jump disabled", 2)
+	end
+end)
+
+my_own_section:AddSlider("Cooldown Font Size", 8, 48, 22, function(int)
+	cdFontSize = int
+	if cdLabel then
+		cdLabel.TextSize = cdFontSize
+	end
+end)
